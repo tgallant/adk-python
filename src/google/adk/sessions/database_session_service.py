@@ -126,12 +126,16 @@ class DynamicPickleType(TypeDecorator):
     if value is not None:
       if dialect.name == "spanner+spanner":
         return pickle.dumps(value)
+      if dialect.name == "mysql":
+        return pickle.dumps(value)
     return value
 
   def process_result_value(self, value, dialect):
     """Ensures the raw bytes from the database are unpickled back into a Python object."""
     if value is not None:
       if dialect.name == "spanner+spanner":
+        return pickle.loads(value)
+      if dialect.name == "mysql":
         return pickle.loads(value)
     return value
 
