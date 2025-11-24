@@ -34,6 +34,7 @@ from ..sessions.base_session_service import BaseSessionService
 from ..sessions.in_memory_session_service import InMemorySessionService
 from ..sessions.session import Session
 from ..utils.context_utils import Aclosing
+from ..utils.env_utils import is_env_enabled
 from .utils import envs
 from .utils.agent_loader import AgentLoader
 
@@ -154,18 +155,22 @@ async def run_cli(
   credential_service = InMemoryCredentialService()
 
   user_id = 'test_user'
-  session = await session_service.create_session(
-      app_name=agent_folder_name, user_id=user_id
-  )
-  root_agent = AgentLoader(agents_dir=agent_parent_dir).load_agent(
+  agent_or_app = AgentLoader(agents_dir=agent_parent_dir).load_agent(
       agent_folder_name
   )
-  envs.load_dotenv_for_agent(agent_folder_name, agent_parent_dir)
+  session_app_name = (
+      agent_or_app.name if isinstance(agent_or_app, App) else agent_folder_name
+  )
+  session = await session_service.create_session(
+      app_name=session_app_name, user_id=user_id
+  )
+  if not is_env_enabled('ADK_DISABLE_LOAD_DOTENV'):
+    envs.load_dotenv_for_agent(agent_folder_name, agent_parent_dir)
   if input_file:
     session = await run_input_file(
-        app_name=agent_folder_name,
+        app_name=session_app_name,
         user_id=user_id,
-        agent_or_app=root_agent,
+        agent_or_app=agent_or_app,
         artifact_service=artifact_service,
         session_service=session_service,
         credential_service=credential_service,
@@ -181,22 +186,19 @@ async def run_cli(
         content = event.content
         if not content or not content.parts or not content.parts[0].text:
           continue
-        if event.author == 'user':
-          click.echo(f'[user]: {content.parts[0].text}')
-        else:
-          click.echo(f'[{event.author}]: {content.parts[0].text}')
+        click.echo(f'[{event.author}]: {content.parts[0].text}')
 
     await run_interactively(
-        root_agent,
+        agent_or_app,
         artifact_service,
         session,
         session_service,
         credential_service,
     )
   else:
-    click.echo(f'Running agent {root_agent.name}, type exit to exit.')
+    click.echo(f'Running agent {agent_or_app.name}, type exit to exit.')
     await run_interactively(
-        root_agent,
+        agent_or_app,
         artifact_service,
         session,
         session_service,

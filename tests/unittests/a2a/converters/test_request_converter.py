@@ -165,6 +165,7 @@ class TestConvertA2aRequestToAgentRunRequest:
     request.message = mock_message
     request.context_id = "test_context_123"
     request.call_context = mock_call_context
+    request.metadata = {"test_key": "test_value"}
 
     # Create proper genai_types.Part objects instead of mocks
     mock_genai_part1 = genai_types.Part(text="test part 1")
@@ -185,6 +186,61 @@ class TestConvertA2aRequestToAgentRunRequest:
     assert result.new_message.role == "user"
     assert result.new_message.parts == [mock_genai_part1, mock_genai_part2]
     assert isinstance(result.run_config, RunConfig)
+    assert result.run_config.custom_metadata == {
+        "a2a_metadata": {"test_key": "test_value"}
+    }
+
+    # Verify calls
+    assert mock_convert_part.call_count == 2
+    mock_convert_part.assert_any_call(mock_part1)
+    mock_convert_part.assert_any_call(mock_part2)
+
+  def test_convert_a2a_request_multiple_parts(self):
+    """Test basic conversion of A2A request to ADK AgentRunRequest."""
+    # Arrange
+    mock_part1 = Mock()
+    mock_part2 = Mock()
+
+    mock_message = Mock()
+    mock_message.parts = [mock_part1, mock_part2]
+
+    mock_user = Mock()
+    mock_user.user_name = "test_user"
+
+    mock_call_context = Mock()
+    mock_call_context.user = mock_user
+
+    request = Mock(spec=RequestContext)
+    request.message = mock_message
+    request.context_id = "test_context_123"
+    request.call_context = mock_call_context
+    request.metadata = {"test_key": "test_value"}
+
+    # Create proper genai_types.Part objects instead of mocks
+    mock_genai_part1 = genai_types.Part(text="test part 1")
+    mock_genai_part2 = genai_types.Part(text="test part 2")
+    mock_convert_part = Mock()
+    mock_convert_part.side_effect = [mock_genai_part1, mock_genai_part2]
+
+    # Act
+    result = convert_a2a_request_to_agent_run_request(
+        request, mock_convert_part
+    )
+
+    # Assert
+    assert result is not None
+    assert result.user_id == "test_user"
+    assert result.session_id == "test_context_123"
+    assert isinstance(result.new_message, genai_types.Content)
+    assert result.new_message.role == "user"
+    assert result.new_message.parts == [
+        mock_genai_part1,
+        mock_genai_part2,
+    ]
+    assert isinstance(result.run_config, RunConfig)
+    assert result.run_config.custom_metadata == {
+        "a2a_metadata": {"test_key": "test_value"}
+    }
 
     # Verify calls
     assert mock_convert_part.call_count == 2
@@ -212,6 +268,7 @@ class TestConvertA2aRequestToAgentRunRequest:
     request.message = mock_message
     request.context_id = "test_context_123"
     request.call_context = None
+    request.metadata = {}
 
     # Act
     result = convert_a2a_request_to_agent_run_request(
@@ -241,6 +298,7 @@ class TestConvertA2aRequestToAgentRunRequest:
     request.message = mock_message
     request.context_id = None
     request.call_context = None
+    request.metadata = {}
 
     # Create proper genai_types.Part object instead of mock
     mock_genai_part = genai_types.Part(text="test part")
@@ -272,6 +330,7 @@ class TestConvertA2aRequestToAgentRunRequest:
     request.message = mock_message
     request.context_id = "session_123"
     request.call_context = None
+    request.metadata = {}
 
     # Create proper genai_types.Part object instead of mock
     mock_genai_part = genai_types.Part(text="test part")
@@ -313,6 +372,7 @@ class TestIntegration:
     request.call_context = mock_call_context
     request.message = mock_message
     request.context_id = "mysession"
+    request.metadata = {}
 
     # Create proper genai_types.Part object instead of mock
     mock_genai_part = genai_types.Part(text="test part")
@@ -344,6 +404,7 @@ class TestIntegration:
     request.call_context = None
     request.message = mock_message
     request.context_id = "test_session_456"
+    request.metadata = {}
 
     # Create proper genai_types.Part object instead of mock
     mock_genai_part = genai_types.Part(text="test part")
@@ -359,7 +420,7 @@ class TestIntegration:
     assert result is not None
     assert (
         result.user_id == "A2A_USER_test_session_456"
-    )  # Should fallback to context ID
+    )  # Should fall back to context ID
     assert result.session_id == "test_session_456"
     assert isinstance(result.new_message, genai_types.Content)
     assert result.new_message.role == "user"

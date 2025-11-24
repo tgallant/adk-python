@@ -24,12 +24,16 @@ from google.adk.models.cache_metadata import CacheMetadata
 from google.adk.models.gemini_llm_connection import GeminiLlmConnection
 from google.adk.models.google_llm import _AGENT_ENGINE_TELEMETRY_ENV_VARIABLE_NAME
 from google.adk.models.google_llm import _AGENT_ENGINE_TELEMETRY_TAG
+from google.adk.models.google_llm import _build_function_declaration_log
 from google.adk.models.google_llm import _build_request_log
+from google.adk.models.google_llm import _RESOURCE_EXHAUSTED_POSSIBLE_FIX_MESSAGE
+from google.adk.models.google_llm import _ResourceExhaustedError
 from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.utils.variant_utils import GoogleLLMVariant
 from google.genai import types
+from google.genai.errors import ClientError
 from google.genai.types import Content
 from google.genai.types import Part
 import pytest
@@ -383,6 +387,60 @@ async def test_generate_content_async_stream_preserves_thinking_and_text_parts(
     assert responses[3].content.parts[0].thought is True
     assert responses[3].content.parts[1].text == "Answer."
     mock_client.aio.models.generate_content_stream.assert_called_once()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.asyncio
+async def test_generate_content_async_resource_exhausted_error(
+    stream, gemini_llm, llm_request
+):
+  with mock.patch.object(gemini_llm, "api_client") as mock_client:
+    err = ClientError(code=429, response_json={})
+    err.code = 429
+    if stream:
+      mock_client.aio.models.generate_content_stream.side_effect = err
+    else:
+      mock_client.aio.models.generate_content.side_effect = err
+
+    with pytest.raises(_ResourceExhaustedError) as excinfo:
+      responses = []
+      async for resp in gemini_llm.generate_content_async(
+          llm_request, stream=stream
+      ):
+        responses.append(resp)
+    assert _RESOURCE_EXHAUSTED_POSSIBLE_FIX_MESSAGE in str(excinfo.value)
+    assert excinfo.value.code == 429
+    if stream:
+      mock_client.aio.models.generate_content_stream.assert_called_once()
+    else:
+      mock_client.aio.models.generate_content.assert_called_once()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.asyncio
+async def test_generate_content_async_other_client_error(
+    stream, gemini_llm, llm_request
+):
+  with mock.patch.object(gemini_llm, "api_client") as mock_client:
+    err = ClientError(code=500, response_json={})
+    err.code = 500
+    if stream:
+      mock_client.aio.models.generate_content_stream.side_effect = err
+    else:
+      mock_client.aio.models.generate_content.side_effect = err
+
+    with pytest.raises(ClientError) as excinfo:
+      responses = []
+      async for resp in gemini_llm.generate_content_async(
+          llm_request, stream=stream
+      ):
+        responses.append(resp)
+    assert excinfo.value.code == 500
+    assert not isinstance(excinfo.value, _ResourceExhaustedError)
+    if stream:
+      mock_client.aio.models.generate_content_stream.assert_called_once()
+    else:
+      mock_client.aio.models.generate_content.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1642,11 +1700,15 @@ async def test_generate_content_async_with_cache_metadata_integration(
 ):
   """Test integration between Google LLM and cache manager with proper parameter order.
 
-  This test specifically validates that the cache manager's populate_cache_metadata_in_response
-  method is called with the correct parameter order: (llm_response, cache_metadata).
+  This test specifically validates that the cache manager's
+  populate_cache_metadata_in_response
+  method is called with the correct parameter order: (llm_response,
+  cache_metadata).
 
-  This test would have caught the parameter order bug where cache_metadata and llm_response
-  were passed in the wrong order, causing 'CacheMetadata' object has no attribute 'usage_metadata' errors.
+  This test would have caught the parameter order bug where cache_metadata and
+  llm_response
+  were passed in the wrong order, causing 'CacheMetadata' object has no
+  attribute 'usage_metadata' errors.
   """
 
   # Create a mock response with usage metadata including cached tokens
@@ -1727,6 +1789,54 @@ async def test_generate_content_async_with_cache_metadata_integration(
       # Verify cache metadata is preserved
       assert second_arg.cache_name == cache_metadata.cache_name
       assert second_arg.invocations_used == cache_metadata.invocations_used
+
+
+def test_build_function_declaration_log():
+  """Test that _build_function_declaration_log formats function declarations correctly."""
+  # Test case 1: Function with parameters and response
+  func_decl1 = types.FunctionDeclaration(
+      name="test_func1",
+      description="Test function 1",
+      parameters=types.Schema(
+          type=types.Type.OBJECT,
+          properties={
+              "param1": types.Schema(
+                  type=types.Type.STRING, description="param1 desc"
+              )
+          },
+      ),
+      response=types.Schema(type=types.Type.BOOLEAN, description="return bool"),
+  )
+  log1 = _build_function_declaration_log(func_decl1)
+  assert log1 == (
+      "test_func1: {'param1': {'description': 'param1 desc', 'type':"
+      " <Type.STRING: 'STRING'>}} -> {'description': 'return bool', 'type':"
+      " <Type.BOOLEAN: 'BOOLEAN'>}"
+  )
+
+  # Test case 2: Function with JSON schema parameters and response
+  func_decl2 = types.FunctionDeclaration(
+      name="test_func2",
+      description="Test function 2",
+      parameters_json_schema={
+          "type": "object",
+          "properties": {"param2": {"type": "integer"}},
+      },
+      response_json_schema={"type": "string"},
+  )
+  log2 = _build_function_declaration_log(func_decl2)
+  assert log2 == (
+      "test_func2: {'type': 'object', 'properties': {'param2': {'type':"
+      " 'integer'}}} -> {'type': 'string'}"
+  )
+
+  # Test case 3: Function with no parameters and no response
+  func_decl3 = types.FunctionDeclaration(
+      name="test_func3",
+      description="Test function 3",
+  )
+  log3 = _build_function_declaration_log(func_decl3)
+  assert log3 == "test_func3: {} "
 
 
 def test_build_request_log_with_config_multiple_tool_types():
@@ -1858,3 +1968,189 @@ def test_build_request_log_fallback_to_repr_on_all_failures(monkeypatch):
   # Should still succeed using repr()
   assert "Config:" in log_output
   assert "GenerateContentConfig" in log_output
+
+
+@pytest.mark.asyncio
+async def test_connect_uses_gemini_speech_config_when_request_is_none(
+    gemini_llm, llm_request
+):
+  """Tests that Gemini's speech_config is used when live_connect_config's is None."""
+  # Arrange: Set a speech_config on the Gemini instance with the voice "Kore"
+  gemini_llm.speech_config = types.SpeechConfig(
+      voice_config=types.VoiceConfig(
+          prebuilt_voice_config=types.PrebuiltVoiceConfig(
+              voice_name="Kore",
+          )
+      )
+  )
+  llm_request.live_connect_config = (
+      types.LiveConnectConfig()
+  )  # speech_config is None
+
+  mock_live_session = mock.AsyncMock()
+
+  with mock.patch.object(gemini_llm, "_live_api_client") as mock_live_client:
+
+    class MockLiveConnect:
+
+      async def __aenter__(self):
+        return mock_live_session
+
+      async def __aexit__(self, *args):
+        pass
+
+    mock_live_client.aio.live.connect.return_value = MockLiveConnect()
+
+    # Act
+    async with gemini_llm.connect(llm_request) as connection:
+      # Assert
+      mock_live_client.aio.live.connect.assert_called_once()
+      call_args = mock_live_client.aio.live.connect.call_args
+      config_arg = call_args.kwargs["config"]
+
+      # Verify the speech_config from the Gemini instance was used
+      assert config_arg.speech_config is not None
+      assert (
+          config_arg.speech_config.voice_config.prebuilt_voice_config.voice_name
+          == "Kore"
+      )
+      assert isinstance(connection, GeminiLlmConnection)
+
+
+@pytest.mark.asyncio
+async def test_connect_uses_request_speech_config_when_gemini_is_none(
+    gemini_llm, llm_request
+):
+  """Tests that request's speech_config is used when Gemini's is None."""
+  # Arrange: Set a speech_config on the request instance with the voice "Kore"
+  gemini_llm.speech_config = None
+  request_speech_config = types.SpeechConfig(
+      voice_config=types.VoiceConfig(
+          prebuilt_voice_config=types.PrebuiltVoiceConfig(
+              voice_name="Kore",
+          )
+      )
+  )
+  llm_request.live_connect_config = types.LiveConnectConfig(
+      speech_config=request_speech_config
+  )
+
+  mock_live_session = mock.AsyncMock()
+
+  with mock.patch.object(gemini_llm, "_live_api_client") as mock_live_client:
+
+    class MockLiveConnect:
+
+      async def __aenter__(self):
+        return mock_live_session
+
+      async def __aexit__(self, *args):
+        pass
+
+    mock_live_client.aio.live.connect.return_value = MockLiveConnect()
+
+    # Act
+    async with gemini_llm.connect(llm_request) as connection:
+      # Assert
+      mock_live_client.aio.live.connect.assert_called_once()
+      call_args = mock_live_client.aio.live.connect.call_args
+      config_arg = call_args.kwargs["config"]
+
+      # Verify the speech_config from the request instance was used
+      assert config_arg.speech_config is not None
+      assert (
+          config_arg.speech_config.voice_config.prebuilt_voice_config.voice_name
+          == "Kore"
+      )
+      assert isinstance(connection, GeminiLlmConnection)
+
+
+@pytest.mark.asyncio
+async def test_connect_request_gemini_config_overrides_speech_config(
+    gemini_llm, llm_request
+):
+  """Tests that live_connect_config's speech_config is preserved even if Gemini has one."""
+  # Arrange: Set different speech_configs on both the Gemini instance ("Puck") and the request ("Zephyr")
+  gemini_llm.speech_config = types.SpeechConfig(
+      voice_config=types.VoiceConfig(
+          prebuilt_voice_config=types.PrebuiltVoiceConfig(
+              voice_name="Puck",
+          )
+      )
+  )
+  request_speech_config = types.SpeechConfig(
+      voice_config=types.VoiceConfig(
+          prebuilt_voice_config=types.PrebuiltVoiceConfig(
+              voice_name="Zephyr",
+          )
+      )
+  )
+  llm_request.live_connect_config = types.LiveConnectConfig(
+      speech_config=request_speech_config
+  )
+
+  mock_live_session = mock.AsyncMock()
+
+  with mock.patch.object(gemini_llm, "_live_api_client") as mock_live_client:
+
+    class MockLiveConnect:
+
+      async def __aenter__(self):
+        return mock_live_session
+
+      async def __aexit__(self, *args):
+        pass
+
+    mock_live_client.aio.live.connect.return_value = MockLiveConnect()
+
+    # Act
+    async with gemini_llm.connect(llm_request) as connection:
+      # Assert
+      mock_live_client.aio.live.connect.assert_called_once()
+      call_args = mock_live_client.aio.live.connect.call_args
+      config_arg = call_args.kwargs["config"]
+
+      # Verify the speech_config from the request ("Zephyr") was overwritten by Gemini's speech_config ("Puck")
+      assert config_arg.speech_config is not None
+      assert (
+          config_arg.speech_config.voice_config.prebuilt_voice_config.voice_name
+          == "Puck"
+      )
+      assert isinstance(connection, GeminiLlmConnection)
+
+
+@pytest.mark.asyncio
+async def test_connect_speech_config_remains_none_when_both_are_none(
+    gemini_llm, llm_request
+):
+  """Tests that speech_config is None when neither Gemini nor the request has it."""
+  # Arrange: Ensure both Gemini instance and request have no speech_config
+  gemini_llm.speech_config = None
+  llm_request.live_connect_config = (
+      types.LiveConnectConfig()
+  )  # speech_config is None
+
+  mock_live_session = mock.AsyncMock()
+
+  with mock.patch.object(gemini_llm, "_live_api_client") as mock_live_client:
+
+    class MockLiveConnect:
+
+      async def __aenter__(self):
+        return mock_live_session
+
+      async def __aexit__(self, *args):
+        pass
+
+    mock_live_client.aio.live.connect.return_value = MockLiveConnect()
+
+    # Act
+    async with gemini_llm.connect(llm_request) as connection:
+      # Assert
+      mock_live_client.aio.live.connect.assert_called_once()
+      call_args = mock_live_client.aio.live.connect.call_args
+      config_arg = call_args.kwargs["config"]
+
+      # Verify the final speech_config is still None
+      assert config_arg.speech_config is None
+      assert isinstance(connection, GeminiLlmConnection)
